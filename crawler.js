@@ -1,4 +1,4 @@
-console.log("🚀 optimized crawler started");
+console.log("🚀 Roblox Archive Scanner started");
 
 import { chromium } from "playwright";
 import fs from "fs-extra";
@@ -6,129 +6,151 @@ import fs from "fs-extra";
 const OUTPUT_FILE = "games.txt";
 const CHECKED_FILE = "checked.txt";
 
-const MAX_ITERATIONS = 18000; // adjust safely (don’t go insane at first)
-const DELAY_MS = 500;
+const MIN_YEAR = 2007;
+const MAX_YEAR = 2013;
 
-// ---------- LOAD CHECKED IDS ----------
+const BATCH_SIZE = 18000;
+const DELAY = 350; // faster but still safe-ish
+
 let checked = new Set();
 
 if (await fs.pathExists(CHECKED_FILE)) {
   const data = await fs.readFile(CHECKED_FILE, "utf-8");
-  data.split("\n").forEach(id => {
-    const clean = id.trim();
-    if (clean) checked.add(clean);
-  });
+  data.split("\n").forEach(id => checked.add(id.trim()));
 }
 
-// ---------- HELPERS ----------
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+async function append(file, text) {
+  await fs.appendFile(file, text + "\n");
+}
 
 function randomId() {
-  return Math.floor(Math.random() * (25000000 - 100000 + 1)) + 100000;
+  // better distribution than pure random
+  const base = 10000000;
+  return String(base + Math.floor(Math.random() * 20000000));
 }
 
-async function markChecked(id) {
-  checked.add(id);
-  await fs.appendFile(CHECKED_FILE, id + "\n");
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-async function logResult(type, id, title = "") {
-  const line = `${type} | ${title} | ${id}`;
-  console.log(line);
-  await fs.appendFile(OUTPUT_FILE, line + "\n");
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage();
+
+async function extractYear(text) {
+  // Roblox often shows dates like "Created: Jan 1, 2012"
+  const match = text.match(/(20\d{2})/);
+  if (!match) return null;
+  return parseInt(match[1]);
 }
 
-// ---------- DETECTION CORE ----------
-async function checkGame(page, id) {
+async function checkGame(id) {
   const url = `https://www.roblox.com/games/${id}`;
+
+  console.log(`\n🔍 Checking ${id}`);
 
   try {
     await page.goto(url, {
       waitUntil: "domcontentloaded",
-      timeout: 20000,
+      timeout: 15000,
     });
 
     const finalUrl = page.url();
 
-    // 1. Deleted / 404 detection
+    // ❌ Deleted
     if (finalUrl.includes("request-error?code=404")) {
-      return { type: "DELETED" };
+      console.log("❌ Deleted");
+      return { status: "deleted" };
     }
 
-    const title = (await page.title() || "").trim();
+    // ❌ Invalid redirect bug
+    if (finalUrl.includes("Play%20on%20Roblox")) {
+      console.log("⚠️ Invalid redirect");
+      return { status: "invalid" };
+    }
 
-    // 2. Fast reject: empty / placeholder
+    const text = await page.evaluate(() =>
+      document.body ? document.body.innerText : ""
+    );
+
+    const title = (await page.title())?.trim();
+
+    console.log("📄 Title:", title || "none");
+
+    // 🔞 unrated
+    if (text.includes("not accessible because it is unrated")) {
+      console.log("🔞 Unrated experience");
+      return { status: "unrated" };
+    }
+
+    // 🚫 unavailable
+    if (text.includes("experience cannot be visited") ||
+        text.includes("This experience is unavailable")) {
+      console.log("🚫 Unavailable");
+      return { status: "unavailable" };
+    }
+
     if (!title || title === "Roblox") {
-      return { type: "INVALID" };
+      console.log("⚠️ Empty page");
+      return { status: "empty" };
     }
 
-    // 3. Unrated / age restricted
-    const bodyText = await page.evaluate(() => document.body.innerText);
-
-    if (
-      bodyText.includes("not accessible because it is unrated") ||
-      bodyText.includes("This experience is not accessible because it is unrated")
-    ) {
-      return { type: "UNRATED" };
+    if (title.toLowerCase().includes("play on roblox")) {
+      console.log("⚠️ Fake title");
+      return { status: "invalid" };
     }
 
-    // 4. Unavailable / private / broken
-    if (
-      bodyText.includes("experience cannot be visited") ||
-      bodyText.includes("This experience is unavailable") ||
-      bodyText.includes("content is not available")
-    ) {
-      return { type: "UNAVAILABLE" };
+    // 📅 attempt year detection
+    const year = await extractYear(text);
+    console.log("📅 Year detected:", year || "unknown");
+
+    if (year && (year < MIN_YEAR || year > MAX_YEAR)) {
+      console.log("⏭ Outside target range (2007–2013)");
+      return { status: "out_of_range", year };
     }
 
-    // 5. Fake titles
-    if (
-      title.toLowerCase().includes("play on roblox") ||
-      title.length < 3
-    ) {
-      return { type: "INVALID" };
-    }
+    // 🎮 valid candidate
+    console.log("✅ VALID CANDIDATE FOUND");
 
-    // 6. IMPORTANT FIX: kill "Loading..." false positives
-    if (title.toLowerCase().includes("loading")) {
-      return { type: "INVALID" };
-    }
-
-    // 7. VALID GAME
     return {
-      type: "VALID",
-      title
+      status: "valid",
+      title,
+      id,
+      year: year || "unknown"
     };
 
   } catch (e) {
-    return { type: "ERROR" };
+    console.log("❌ Error loading page");
+    return { status: "error" };
   }
 }
 
-// ---------- MAIN ----------
-const browser = await chromium.launch({ headless: true });
-const page = await browser.newPage();
+async function run() {
+  for (let i = 0; i < BATCH_SIZE; i++) {
+    const id = randomId();
 
-for (let i = 0; i < MAX_ITERATIONS; i++) {
-  const id = String(randomId());
+    if (checked.has(id)) continue;
 
-  if (checked.has(id)) continue;
+    const result = await checkGame(id);
 
-  console.log("Checking:", id);
+    checked.add(id);
+    await append(CHECKED_FILE, id);
 
-  const result = await checkGame(page, id);
+    if (result.status === "valid") {
+      await append(
+        OUTPUT_FILE,
+        `VALID | ${result.title} | ${result.id} | YEAR:${result.year}`
+      );
+    } else {
+      await append(
+        OUTPUT_FILE,
+        `${result.status.toUpperCase()} | ${id} | YEAR:${result.year || "?"}`
+      );
+    }
 
-  await markChecked(id);
-
-  if (result.type === "VALID") {
-    await logResult("VALID", id, result.title);
-  } else {
-    // optional logging (keeps dataset useful)
-    await logResult(result.type, id);
+    await sleep(DELAY);
   }
 
-  await sleep(DELAY_MS);
+  await browser.close();
 }
 
-await browser.close();
-console.log("✅ crawler finished");
+run();
