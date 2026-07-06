@@ -7,8 +7,7 @@ import { execSync } from "child_process";
    CONFIG
    ============================================================ */
 
-const OUTPUT_FILE = "games.txt";     // only VALID/interesting results (or all — see WRITE_ALL_TO_GAMES below)
-const CHECKED_FILE = "checked.txt";  // every single ID that was checked, regardless of status
+const OUTPUT_FILE = "games.txt";
 const STATE_FILE = "scan_state.json"; // tracks resume position per range
 
 const MIN_YEAR = 2007;
@@ -26,23 +25,10 @@ const RANGES = [
   { start: 40_000_000, end: 135_000_000 } // 2012-2013ish
 ];
 
-const BATCH_IDS = 100;       // IDs grouped per "batch" for the /v1/games lookup step
-const BATCHES_PER_RUN = 300; // ~30,000 IDs checked per workflow run
-const CONCURRENCY = 3;       // how many batches to process in parallel per "wave"
-const INNER_CONCURRENCY = 20; // how many per-ID universe lookups run in parallel within a batch
-const WAVE_DELAY_MS = 300;   // pause between waves (not between every request) — keeps bursts spaced out
-const COMMIT_EVERY_N_WAVES = 2; // checkpoint commit so cancelled runs don't lose progress
-const FLUSH_EVERY_N_ITEMS = 100;  // write buffered lines to disk every N processed IDs
-
-// Backoff settings for when Roblox responds with 429 (rate limited) or 5xx
-const MAX_RETRIES = 4;
-const RETRY_BASE_DELAY_MS = 500; // doubles each retry: 500ms, 1s, 2s, 4s
-
-// If true, every checked ID's line goes into games.txt too (not just checked.txt).
-// If false, games.txt only gets lines worth keeping (VALID/UNRATED/etc — you decide below).
-const WRITE_ALL_TO_GAMES = true;
-
-console.log(`Scanning ${BATCHES_PER_RUN * BATCH_IDS} IDs this run.`);
+const BATCH_IDS = 50;        // Roblox multiget endpoints accept batches (keep conservative)
+const BATCHES_PER_RUN = 60;  // ~3000 IDs checked per workflow run
+const REQUEST_DELAY_MS = 250;
+const COMMIT_EVERY_N_BATCHES = 5; // checkpoint commit so cancelled runs don't lose progress
 
 /* ============================================================
    STATE
@@ -61,17 +47,8 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-// Run `worker` over `items` with at most `limit` in flight at once.
-async function runWithConcurrency(items, limit, worker) {
-  let i = 0;
-  async function next() {
-    while (i < items.length) {
-      const idx = i++;
-      await worker(items[idx], idx);
-    }
-  }
-  const workers = Array.from({ length: Math.min(limit, items.length) }, next);
-  await Promise.all(workers);
+async function append(file, text) {
+  await fs.appendFile(file, text + "\n");
 }
 
 async function saveState() {
@@ -82,33 +59,12 @@ function commitCheckpoint(label) {
   try {
     execSync(`git config user.name "github-actions"`, { stdio: "ignore" });
     execSync(`git config user.email "github-actions@github.com"`, { stdio: "ignore" });
-
-    // Stage everything that may have changed
-    execSync(`git add .`, { stdio: "ignore" });
-
-    // Commit if needed
-    try {
-      execSync(`git commit -m "checkpoint: ${label}"`, {
-        stdio: "ignore"
-      });
-    } catch {
-      console.log("📁 No new changes to commit.");
-      return;
-    }
-
-    // Pull remote changes first in case another commit happened
-    try {
-      execSync(`git pull --rebase`, { stdio: "inherit" });
-    } catch {
-      console.log("⚠️ Could not rebase, continuing...");
-    }
-
-    // Push
+    execSync(`git add ${OUTPUT_FILE} ${STATE_FILE}`, { stdio: "ignore" });
+    execSync(`git commit -m "checkpoint: ${label}" || echo "no changes"`, { stdio: "inherit" });
     execSync(`git push`, { stdio: "inherit" });
-
-    console.log(`💾 Git checkpoint pushed (${label})`);
+    console.log(`💾 Checkpoint committed (${label})`);
   } catch (e) {
-    console.log("⚠️ Save failed:", e.message);
+    console.log("⚠️ Checkpoint commit failed (continuing anyway):", e.message);
   }
 }
 
@@ -132,21 +88,10 @@ function nextIdBatch() {
    ROBLOX API HELPERS
    ============================================================ */
 
-async function fetchJson(url, attempt = 0) {
+async function fetchJson(url) {
   const res = await fetch(url, {
     headers: { "User-Agent": "Mozilla/5.0 (RobloxArchiveProject/1.0)" }
   });
-
-  if (res.status === 429 || res.status >= 500) {
-    if (attempt >= MAX_RETRIES) {
-      throw new Error(`HTTP ${res.status} for ${url} (out of retries)`);
-    }
-    const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-    console.log(`  ⏳ HTTP ${res.status}, backing off ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
-    await sleep(delay);
-    return fetchJson(url, attempt + 1);
-  }
-
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} for ${url}`);
   }
@@ -210,126 +155,72 @@ function classify(place, gameInfo) {
 }
 
 /* ============================================================
-   BUFFERED WRITER
-   ============================================================ */
-
-// Every checked line always goes in checkedBuffer -> checked.txt.
-// gamesBuffer only gets a line if WRITE_ALL_TO_GAMES is true, or you
-// can tighten this to e.g. status !== "DELETED" to keep games.txt leaner.
-let checkedBuffer = [];
-let gamesBuffer = [];
-let itemsSinceFlush = 0;
-
-async function flushBuffers(force = false) {
-  if (!force && itemsSinceFlush < FLUSH_EVERY_N_ITEMS) return;
-  if (checkedBuffer.length === 0 && gamesBuffer.length === 0) return;
-
-  if (checkedBuffer.length) {
-    await fs.appendFile(CHECKED_FILE, checkedBuffer.join("\n") + "\n");
-    checkedBuffer = [];
-  }
-  if (gamesBuffer.length) {
-    await fs.appendFile(OUTPUT_FILE, gamesBuffer.join("\n") + "\n");
-    gamesBuffer = [];
-  }
-  itemsSinceFlush = 0;
-}
-
-/* ============================================================
    MAIN LOOP
    ============================================================ */
 
-// Fetch + classify + buffer a single batch of IDs. Safe to run concurrently
-// with other calls to this function since it only touches shared buffers
-// via push (no read-modify-write races) and flushBuffers() is only ever
-// awaited from the single-threaded main loop between waves.
-async function processBatch(ids, batchLabel) {
-  console.log(`\n🔍 Batch ${batchLabel}: IDs ${ids[0]}–${ids[ids.length - 1]}`);
-
-  let places = [];
-  try {
-    const details = await getPlaceDetails(ids);
-    places = details.length ? details : (details.PlaceDetails || details.placeDetails || []);
-    if (!Array.isArray(places)) places = [];
-  } catch (e) {
-    console.log(`❌ Batch ${batchLabel} multiget-place-details failed:`, e.message);
-    return; // this batch's IDs are simply skipped this run; cursor already moved past them
-  }
-
-  const placeById = new Map(places.map(p => [p.placeId, p]));
-  const universeIds = [...new Set(places.map(p => p.universeId).filter(Boolean))];
-
-  let gamesByUniverse = new Map();
-  try {
-    const games = await getGameDetails(universeIds);
-    gamesByUniverse = new Map(games.map(g => [g.id, g]));
-  } catch (e) {
-    console.log(`⚠️ Batch ${batchLabel} /v1/games failed (marking those as unavailable):`, e.message);
-  }
-
-  for (const id of ids) {
-    const place = placeById.get(id);
-    const gameInfo = place ? gamesByUniverse.get(place.universeId) : undefined;
-    const result = classify(place, gameInfo);
-
-    const title = (result.title || place?.name || "").replace(/\|/g, "/").trim();
-    const year = result.year || "?";
-    const line = `${result.status} | ${id} | ${title || "(untitled)"} | YEAR:${year} | REASON:${result.reason}`;
-
-    console.log(`💾 Saved: ${line}`);
-
-    checkedBuffer.push(line);
-    if (WRITE_ALL_TO_GAMES) gamesBuffer.push(line);
-    itemsSinceFlush++;
-  }
-}
-
 async function run() {
-  // Pre-plan all the ID batches for this run up front (this is what advances
-  // state.cursor). We do this synchronously/sequentially so resume position
-  // stays deterministic even though the actual fetching below runs concurrently.
-  const plannedBatches = [];
+  let batchesDone = 0;
+
   for (let b = 0; b < BATCHES_PER_RUN; b++) {
     const ids = nextIdBatch();
-    if (ids.length === 0) break;
-    plannedBatches.push(ids);
-  }
-
-  if (plannedBatches.length === 0) {
-    console.log("✅ All configured ID ranges have been fully scanned.");
-    await flushBuffers(true);
-    commitCheckpoint("end of run (nothing left to scan)");
-    return;
-  }
-
-  let wave = 0;
-  for (let i = 0; i < plannedBatches.length; i += CONCURRENCY) {
-    const group = plannedBatches.slice(i, i + CONCURRENCY);
-
-    await Promise.all(
-      group.map((ids, idx) => processBatch(ids, `${i + idx + 1}/${plannedBatches.length}`))
-    );
-
-    await flushBuffers(); // no-op unless itemsSinceFlush hit FLUSH_EVERY_N_ITEMS
-    await saveState();
-    wave++;
-
-    if (wave % COMMIT_EVERY_N_WAVES === 0) {
-      await flushBuffers(true); // make sure disk is up to date before committing
-      commitCheckpoint(`wave ${wave}, cursor ${state.cursor}`);
+    if (ids.length === 0) {
+      console.log("✅ All configured ID ranges have been fully scanned.");
+      break;
     }
 
-    await sleep(WAVE_DELAY_MS); // brief pause between waves, not between every request
+    console.log(`\n🔍 Batch ${b + 1}/${BATCHES_PER_RUN}: IDs ${ids[0]}–${ids[ids.length - 1]}`);
+
+    let places = [];
+    try {
+      const details = await getPlaceDetails(ids);
+      places = details.length ? details : (details.PlaceDetails || details.placeDetails || []);
+      if (!Array.isArray(places)) places = [];
+    } catch (e) {
+      console.log("❌ multiget-place-details failed:", e.message);
+      await sleep(REQUEST_DELAY_MS * 4);
+      continue;
+    }
+
+    const placeById = new Map(places.map(p => [p.placeId, p]));
+    const universeIds = [...new Set(places.map(p => p.universeId).filter(Boolean))];
+
+    let gamesByUniverse = new Map();
+    try {
+      const games = await getGameDetails(universeIds);
+      gamesByUniverse = new Map(games.map(g => [g.id, g]));
+    } catch (e) {
+      console.log("⚠️ /v1/games batch failed (will mark those as unavailable):", e.message);
+    }
+
+    for (const id of ids) {
+      const place = placeById.get(id);
+      const gameInfo = place ? gamesByUniverse.get(place.universeId) : undefined;
+      const result = classify(place, gameInfo);
+
+      const title = (result.title || place?.name || "").replace(/\|/g, "/").trim();
+      const year = result.year || "?";
+      const line = `${result.status} | ${id} | ${title || "(untitled)"} | YEAR:${year} | REASON:${result.reason}`;
+
+      console.log(`  ${id}: ${result.status}${result.year ? " (" + result.year + ")" : ""}`);
+      await append(OUTPUT_FILE, line);
+    }
+
+    await saveState();
+    batchesDone++;
+
+    if (batchesDone % COMMIT_EVERY_N_BATCHES === 0) {
+      commitCheckpoint(`batch ${b + 1}, cursor ${state.cursor}`);
+    }
+
+    await sleep(REQUEST_DELAY_MS);
   }
 
-  await flushBuffers(true); // final flush so nothing buffered gets lost
   await saveState();
   commitCheckpoint("end of run");
   console.log("\n🏁 Run complete.");
 }
 
-run().catch(async e => {
+run().catch(e => {
   console.error("Fatal error:", e);
-  await flushBuffers(true); // don't lose buffered progress on crash
   process.exit(1);
 });
