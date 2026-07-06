@@ -2,71 +2,68 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Roblox Archival Index</title>
+<title>Roblox Archive Index</title>
 
 <style>
 body {
   margin: 0;
   font-family: Arial, sans-serif;
-  background: #0f0f14;
-  color: white;
+  background: #0f0f0f;
+  color: #eaeaea;
 }
 
+/* HEADER */
 header {
-  padding: 20px;
+  padding: 15px;
+  background: #151515;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+/* CONTROLS */
+.controls {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  align-items: center;
-  background: #151521;
-  position: sticky;
-  top: 0;
 }
 
 input, select, button {
   padding: 8px;
-  border-radius: 6px;
+  border-radius: 5px;
   border: none;
 }
 
-button {
-  cursor: pointer;
-  background: #2d6cdf;
-  color: white;
-}
-
-button:hover {
-  background: #1f4fb3;
-}
-
-#grid {
+/* GRID / LIST */
+#list.grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 12px;
-  padding: 15px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 10px;
 }
 
-.card {
-  background: #1a1a25;
-  border-radius: 10px;
-  padding: 12px;
-  transition: 0.2s;
+#list.list {
+  display: block;
+  padding: 10px;
 }
 
-.card:hover {
-  transform: scale(1.02);
-  background: #222236;
-}
-
-.square .card {
-  height: 180px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
+/* ITEM CARD */
+.item {
+  background: #1c1c1c;
+  border-radius: 8px;
+  padding: 10px;
+  position: relative;
+  overflow: hidden;
 }
 
 .title {
   font-weight: bold;
+  margin-bottom: 5px;
 }
 
 .meta {
@@ -74,116 +71,136 @@ button:hover {
   opacity: 0.7;
 }
 
-.play {
-  width: 40px;
-  height: 40px;
-  cursor: pointer;
+/* PLAY BUTTON (FIXED STRETCH ISSUE) */
+.play-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: #2a2a2a;
+  border-radius: 6px;
+  text-decoration: none;
+  color: #4ea1ff;
 }
 
-.hidden {
-  display: none;
+.play-btn img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain; /* FIXES STRETCHING */
 }
+
+/* STATUS COLORS */
+.VALID { border-left: 4px solid #2ecc71; }
+.DELETED { border-left: 4px solid #e74c3c; }
+.UNAVAILABLE { border-left: 4px solid #f39c12; }
+.UNRATED { border-left: 4px solid #9b59b6; }
+.INVALID { border-left: 4px solid #7f8c8d; }
+
 </style>
 </head>
 
 <body>
 
 <header>
-  <input id="search" placeholder="Search games..." />
+  <h1>🕹 Roblox Archive Index</h1>
 
-  <button onclick="setLayout('grid')">Grid</button>
-  <button onclick="setLayout('square')">Square</button>
+  <div class="controls">
+    <input id="search" placeholder="Search..." />
 
-  <label>
-    <input type="checkbox" id="showInvalid" checked />
-    Invalid
-  </label>
+    <select id="filter">
+      <option value="ALL">All</option>
+      <option value="VALID">Valid</option>
+      <option value="UNRATED">Unrated</option>
+      <option value="UNAVAILABLE">Unavailable</option>
+      <option value="DELETED">Deleted</option>
+      <option value="INVALID">Invalid</option>
+    </select>
 
-  <label>
-    <input type="checkbox" id="showUnrated" checked />
-    Unrated
-  </label>
-
-  <label>
-    <input type="checkbox" id="showUnavailable" checked />
-    Unavailable
-  </label>
-
-  <button onclick="load()">Reload</button>
+    <button onclick="setGrid()">Grid</button>
+    <button onclick="setList()">List</button>
+  </div>
 </header>
 
-<div id="grid"></div>
+<div id="list" class="grid"></div>
 
 <script>
-let layout = "grid";
 let games = [];
 
-function setLayout(type) {
-  layout = type;
-  document.getElementById("grid").className = type === "square" ? "square" : "";
-}
+fetch("games.txt")
+  .then(res => res.text())
+  .then(text => {
+    games = text
+      .split("\n")
+      .filter(Boolean)
+      .map(line => {
+        const parts = line.split("|").map(x => x.trim());
 
-// classify entries
-function classify(title) {
-  const t = title.toLowerCase();
+        return {
+          type: parts[0],
+          title: parts[1] || "",
+          id: parts[2] || parts[1] // fallback if older format
+        };
+      });
 
-  if (t.includes("unavailable")) return "unavailable";
-  if (t.includes("unrated")) return "unrated";
-  if (!title || t === "roblox") return "invalid";
+    render();
+  });
 
-  return "valid";
-}
-
-function shouldShow(type) {
-  if (type === "invalid") return document.getElementById("showInvalid").checked;
-  if (type === "unrated") return document.getElementById("showUnrated").checked;
-  if (type === "unavailable") return document.getElementById("showUnavailable").checked;
-  return true;
+function getLink(g) {
+  if (!g.id || g.type !== "VALID") return null;
+  return `https://www.roblox.com/games/${g.id}`;
 }
 
 function render() {
-  const grid = document.getElementById("grid");
+  const list = document.getElementById("list");
   const search = document.getElementById("search").value.toLowerCase();
+  const filter = document.getElementById("filter").value;
 
-  grid.innerHTML = "";
+  list.innerHTML = "";
 
-  games.forEach(g => {
-    const [title, id] = g.split("|").map(x => x.trim());
-    const type = classify(title);
+  games
+    .filter(g => {
+      if (filter !== "ALL" && g.type !== filter) return false;
+      if (search && !(g.title.toLowerCase().includes(search) || g.id.includes(search))) return false;
+      return true;
+    })
+    .forEach(g => {
+      const div = document.createElement("div");
+      div.className = `item ${g.type}`;
 
-    if (!shouldShow(type)) return;
-    if (!title.toLowerCase().includes(search)) return;
+      const link = getLink(g);
 
-    const card = document.createElement("div");
-    card.className = "card";
+      div.innerHTML = `
+        <div class="title">${g.title || "Unknown"}</div>
+        <div class="meta">ID: ${g.id}</div>
+        <div class="meta">Status: ${g.type}</div>
 
-    card.innerHTML = `
-      <div class="title">${title}</div>
-      <div class="meta">ID: ${id} • ${type}</div>
-      <img class="play"
-        src="https://github.com/Crustav0IndexTeam/Old-Roblox-Archival-Project/blob/main/play%20button.png?raw=true"
-        onclick="window.open('https://www.roblox.com/games/${id}', '_blank')"
-      />
-    `;
+        ${
+          link
+            ? `
+              <a class="play-btn" href="${link}" target="_blank">
+                <img src="https://github.com/Crustav0IndexTeam/Old-Roblox-Archival-Project/blob/main/play%20button.png?raw=true">
+                Play
+              </a>
+            `
+            : `<div class="meta">No playable link</div>`
+        }
+      `;
 
-    grid.appendChild(card);
-  });
-}
-
-async function load() {
-  const res = await fetch("games.txt?_=" + Date.now());
-  const text = await res.text();
-
-  games = text.split("\n").filter(Boolean);
-  render();
+      list.appendChild(div);
+    });
 }
 
 document.getElementById("search").addEventListener("input", render);
-document.getElementById("showInvalid").addEventListener("change", render);
-document.getElementById("showUnrated").addEventListener("change", render);
-document.getElementById("showUnavailable").addEventListener("change", render);
+document.getElementById("filter").addEventListener("change", render);
 
-load();
+function setGrid() {
+  document.getElementById("list").className = "grid";
+}
+
+function setList() {
+  document.getElementById("list").className = "list";
+}
 </script>
 
 </body>
