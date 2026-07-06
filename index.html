@@ -7,119 +7,93 @@
 <style>
 body {
   margin: 0;
-  font-family: Arial, sans-serif;
+  font-family: Arial;
   background: #0f0f0f;
-  color: #eaeaea;
+  color: white;
 }
 
-/* HEADER */
 header {
-  padding: 15px;
-  background: #151515;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  padding: 20px;
 }
 
-h1 {
-  margin: 0;
-  font-size: 20px;
-}
-
-/* CONTROLS */
 .controls {
   display: flex;
-  flex-wrap: wrap;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 input, select, button {
   padding: 8px;
-  border-radius: 5px;
+  border-radius: 6px;
   border: none;
 }
 
-/* GRID / LIST */
-#list.grid {
+.grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 10px;
-  padding: 10px;
+  padding: 20px;
 }
 
-#list.list {
-  display: block;
-  padding: 10px;
-}
-
-/* ITEM CARD */
-.item {
+.card {
   background: #1c1c1c;
-  border-radius: 8px;
   padding: 10px;
-  position: relative;
-  overflow: hidden;
+  border-radius: 10px;
 }
 
-.title {
-  font-weight: bold;
-  margin-bottom: 5px;
-}
-
-.meta {
+.badge {
   font-size: 12px;
-  opacity: 0.7;
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-block;
 }
 
-/* PLAY BUTTON (FIXED STRETCH ISSUE) */
-.play-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.valid { background: green; }
+.deleted { background: red; }
+.unrated { background: orange; }
+.invalid { background: gray; }
+
+.play {
+  display: inline-block;
   margin-top: 8px;
-  padding: 6px 10px;
-  background: #2a2a2a;
-  border-radius: 6px;
-  text-decoration: none;
-  color: #4ea1ff;
 }
 
-.play-btn img {
-  width: 18px;
-  height: 18px;
-  object-fit: contain; /* FIXES STRETCHING */
+.play img {
+  width: 120px;
+  height: auto;
+  display: block;
 }
-
-/* STATUS COLORS */
-.VALID { border-left: 4px solid #2ecc71; }
-.DELETED { border-left: 4px solid #e74c3c; }
-.UNAVAILABLE { border-left: 4px solid #f39c12; }
-.UNRATED { border-left: 4px solid #9b59b6; }
-.INVALID { border-left: 4px solid #7f8c8d; }
-
 </style>
 </head>
 
 <body>
 
 <header>
-  <h1>🕹 Roblox Archive Index</h1>
+<h1>🕹 Roblox Archive</h1>
 
-  <div class="controls">
-    <input id="search" placeholder="Search..." />
+<div class="controls">
+<input id="search" placeholder="Search..." />
 
-    <select id="filter">
-      <option value="ALL">All</option>
-      <option value="VALID">Valid</option>
-      <option value="UNRATED">Unrated</option>
-      <option value="UNAVAILABLE">Unavailable</option>
-      <option value="DELETED">Deleted</option>
-      <option value="INVALID">Invalid</option>
-    </select>
+<select id="filter">
+  <option value="all">All</option>
+  <option value="valid">Valid</option>
+  <option value="deleted">Deleted</option>
+  <option value="unrated">Unrated</option>
+  <option value="invalid">Invalid</option>
+</select>
 
-    <button onclick="setGrid()">Grid</button>
-    <button onclick="setList()">List</button>
-  </div>
+<select id="year">
+  <option value="all">All Years</option>
+  <option value="2013">2013</option>
+  <option value="2012">2012</option>
+  <option value="2011">2011</option>
+  <option value="2010">2010</option>
+  <option value="2009">2009</option>
+  <option value="2008">2008</option>
+  <option value="2007">2007</option>
+</select>
+
+</div>
 </header>
 
 <div id="list" class="grid"></div>
@@ -128,79 +102,61 @@ input, select, button {
 let games = [];
 
 fetch("games.txt")
-  .then(res => res.text())
+  .then(r => r.text())
   .then(text => {
-    games = text
-      .split("\n")
-      .filter(Boolean)
-      .map(line => {
-        const parts = line.split("|").map(x => x.trim());
-
-        return {
-          type: parts[0],
-          title: parts[1] || "",
-          id: parts[2] || parts[1] // fallback if older format
-        };
-      });
-
-    render();
+    games = text.split("\n").filter(Boolean).map(line => {
+      const parts = line.split("|");
+      return {
+        status: parts[0],
+        title: parts[1],
+        id: parts[2],
+        year: parts[3]?.replace("YEAR:", "")
+      };
+    });
+    render(games);
   });
 
-function getLink(g) {
-  if (!g.id || g.type !== "VALID") return null;
-  return `https://www.roblox.com/games/${g.id}`;
-}
-
-function render() {
+function render(data) {
   const list = document.getElementById("list");
-  const search = document.getElementById("search").value.toLowerCase();
-  const filter = document.getElementById("filter").value;
-
   list.innerHTML = "";
 
-  games
-    .filter(g => {
-      if (filter !== "ALL" && g.type !== filter) return false;
-      if (search && !(g.title.toLowerCase().includes(search) || g.id.includes(search))) return false;
-      return true;
-    })
-    .forEach(g => {
-      const div = document.createElement("div");
-      div.className = `item ${g.type}`;
+  data.forEach(g => {
+    const div = document.createElement("div");
+    div.className = "card";
 
-      const link = getLink(g);
+    div.innerHTML = `
+      <div><b>${g.title || "Unknown"}</b></div>
+      <div class="badge ${g.status}">${g.status}</div>
+      <div>Year: ${g.year || "?"}</div>
 
-      div.innerHTML = `
-        <div class="title">${g.title || "Unknown"}</div>
-        <div class="meta">ID: ${g.id}</div>
-        <div class="meta">Status: ${g.type}</div>
+      <a class="play" href="https://www.roblox.com/games/${g.id}" target="_blank">
+        <img src="https://github.com/Crustav0IndexTeam/Old-Roblox-Archival-Project/blob/main/play%20button.png?raw=true">
+      </a>
+    `;
 
-        ${
-          link
-            ? `
-              <a class="play-btn" href="${link}" target="_blank">
-                <img src="https://github.com/Crustav0IndexTeam/Old-Roblox-Archival-Project/blob/main/play%20button.png?raw=true">
-                Play
-              </a>
-            `
-            : `<div class="meta">No playable link</div>`
-        }
-      `;
-
-      list.appendChild(div);
-    });
+    list.appendChild(div);
+  });
 }
 
-document.getElementById("search").addEventListener("input", render);
-document.getElementById("filter").addEventListener("change", render);
+function applyFilters() {
+  const q = document.getElementById("search").value.toLowerCase();
+  const f = document.getElementById("filter").value;
+  const y = document.getElementById("year").value;
 
-function setGrid() {
-  document.getElementById("list").className = "grid";
+  const filtered = games.filter(g => {
+    return (
+      (f === "all" || g.status === f) &&
+      (y === "all" || g.year === y) &&
+      (!q || g.title?.toLowerCase().includes(q))
+    );
+  });
+
+  render(filtered);
 }
 
-function setList() {
-  document.getElementById("list").className = "list";
-}
+document.querySelectorAll("input, select").forEach(el => {
+  el.addEventListener("input", applyFilters);
+});
 </script>
 
 </body>
