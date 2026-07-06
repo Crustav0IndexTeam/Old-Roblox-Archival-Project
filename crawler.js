@@ -26,10 +26,11 @@ const RANGES = [
   { start: 40_000_000, end: 135_000_000 } // 2012-2013ish
 ];
 
-const BATCH_IDS = 100;       // Roblox's multiget-place-details endpoint accepts up to 100 IDs
-const BATCHES_PER_RUN = 300; // ~30,000 IDs checked per workflow run (10x the old 3,000)
-const CONCURRENCY = 5;       // how many batches to fetch in parallel per "wave"
-const WAVE_DELAY_MS = 200;   // pause between waves (not between every request) — keeps bursts spaced out
+const BATCH_IDS = 100;       // IDs grouped per "batch" for the /v1/games lookup step
+const BATCHES_PER_RUN = 300; // ~30,000 IDs checked per workflow run
+const CONCURRENCY = 3;       // how many batches to process in parallel per "wave"
+const INNER_CONCURRENCY = 20; // how many per-ID universe lookups run in parallel within a batch
+const WAVE_DELAY_MS = 300;   // pause between waves (not between every request) — keeps bursts spaced out
 const COMMIT_EVERY_N_WAVES = 2; // checkpoint commit so cancelled runs don't lose progress
 const FLUSH_EVERY_N_ITEMS = 100;  // write buffered lines to disk every N processed IDs
 
@@ -58,6 +59,19 @@ if (await fs.pathExists(STATE_FILE)) {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+// Run `worker` over `items` with at most `limit` in flight at once.
+async function runWithConcurrency(items, limit, worker) {
+  let i = 0;
+  async function next() {
+    while (i < items.length) {
+      const idx = i++;
+      await worker(items[idx], idx);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, next);
+  await Promise.all(workers);
 }
 
 async function saveState() {
