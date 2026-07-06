@@ -6,7 +6,7 @@ import fs from "fs-extra";
 const OUTPUT_FILE = "games.txt";
 const CHECKED_FILE = "checked.txt";
 
-const MAX_ITERATIONS = 2000; // adjust safely (don’t go insane at first)
+const MAX_ITERATIONS = 18000; // adjust safely (don’t go insane at first)
 const DELAY_MS = 500;
 
 // ---------- LOAD CHECKED IDS ----------
