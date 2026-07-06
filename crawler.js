@@ -1,4 +1,4 @@
-console.log("🚀 crawler started");
+console.log("🚀 optimized crawler started");
 
 import { chromium } from "playwright";
 import fs from "fs-extra";
@@ -6,137 +6,133 @@ import fs from "fs-extra";
 const OUTPUT_FILE = "games.txt";
 const CHECKED_FILE = "checked.txt";
 
-// -------------------- LOAD CHECKED IDS --------------------
+const MIN_ID = 100000;
+const MAX_ID = 25000000;
+
+const CONCURRENCY = 3; // safe for Roblox (don’t go crazy)
+const BATCH_SIZE = 60; // per cycle
+
+// -------------------- LOAD CHECKED --------------------
 let checked = new Set();
 
 if (await fs.pathExists(CHECKED_FILE)) {
   const data = await fs.readFile(CHECKED_FILE, "utf-8");
-  data.split("\n").forEach((id) => {
-    const clean = id.trim();
-    if (clean) checked.add(clean);
+  data.split("\n").forEach(id => {
+    if (id.trim()) checked.add(id.trim());
   });
 }
 
 // -------------------- HELPERS --------------------
-const append = (file, text) =>
-  fs.appendFile(file, text + "\n");
-
-const markChecked = async (id) => {
-  const str = String(id);
-  checked.add(str);
-  await append(CHECKED_FILE, str);
-};
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function randomId() {
-  return Math.floor(Math.random() * (25000000 - 100000 + 1)) + 100000;
+  return Math.floor(Math.random() * (MAX_ID - MIN_ID + 1)) + MIN_ID;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function markChecked(id) {
+  checked.add(id);
+  await fs.appendFile(CHECKED_FILE, id + "\n");
+}
+
+async function append(file, text) {
+  await fs.appendFile(file, text + "\n");
+}
 
 // -------------------- BROWSER --------------------
 const browser = await chromium.launch({
-  headless: true,
+  headless: true
 });
 
-const page = await browser.newPage();
+// block heavy resources (MAJOR speed boost)
+const context = await browser.newContext();
 
-// Block images/fonts for speed
-await page.route("**/*", (route) => {
-  const type = route.request().resourceType();
-  if (type === "image" || type === "font") {
+await context.route("**/*", (route) => {
+  const r = route.request().resourceType();
+
+  // block heavy stuff
+  if (["image", "font", "media"].includes(r)) {
     return route.abort();
   }
+
   route.continue();
 });
 
-// -------------------- GAME CHECK --------------------
+const page = await context.newPage();
+
+// -------------------- CHECK GAME --------------------
 async function checkGame(id) {
   const url = `https://www.roblox.com/games/${id}`;
 
   try {
     const response = await page.goto(url, {
       waitUntil: "domcontentloaded",
-      timeout: 20000,
+      timeout: 15000
     });
 
     const finalUrl = page.url();
-    const status = response?.status?.() || 0;
 
-    // 🔴 404 detection (fastest check)
+    // FAST reject: 404 redirect
+    if (finalUrl.includes("request-error?code=404")) {
+      return null;
+    }
+
+    // FAST page check (no full HTML dump)
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+
+    if (!bodyText) return null;
+
+    // ❌ Deleted / not found
     if (
-      status === 404 ||
-      finalUrl.includes("request-error?code=404")
-    ) {
-      console.log(`❌ Deleted: ${id}`);
-      return null;
-    }
-
-    const title = (await page.title())?.trim() || "";
-
-    // 🔴 empty / placeholder page
-    if (!title || title === "Roblox") {
-      console.log(`⚠️ Empty: ${id}`);
-      return null;
-    }
-
-    // Only get HTML if needed (performance boost)
-    const content = await page.content();
+      bodyText.includes("Page not found") ||
+      bodyText.includes("does not exist")
+    ) return null;
 
     // 🔞 Unrated / age blocked
-    if (content.includes("not accessible because it is unrated")) {
-      console.log(`🔞 Unrated: ${id}`);
-      return null;
-    }
-
-    // 🚫 unavailable / private / broken
     if (
-      content.includes("experience cannot be visited") ||
-      content.includes("unavailable") ||
-      content.includes("content is not available")
-    ) {
-      console.log(`🚫 Unavailable: ${id}`);
-      return null;
-    }
+      bodyText.includes("not accessible because it is unrated")
+    ) return null;
 
-    // ❌ fake titles
+    // 🚫 unavailable / private
     if (
-      title.toLowerCase().includes("play on roblox") ||
-      title.length < 3
-    ) {
-      console.log(`⚠️ Invalid: ${id}`);
-      return null;
-    }
+      bodyText.includes("experience cannot be visited") ||
+      bodyText.includes("unavailable")
+    ) return null;
+
+    const title = (await page.title()).trim();
+
+    // ❌ garbage titles
+    if (!title || title === "Roblox") return null;
+    if (title.toLowerCase().includes("play on roblox")) return null;
 
     console.log(`✅ FOUND: ${title} | ${id}`);
     return { id, title };
 
-  } catch (err) {
-    console.log(`❌ Error: ${id}`);
+  } catch {
     return null;
   }
 }
 
-// -------------------- MAIN LOOP --------------------
-async function run() {
-  for (let i = 0; i < 200; i++) {
+// -------------------- WORKER --------------------
+async function worker() {
+  while (true) {
     const id = String(randomId());
 
     if (checked.has(id)) continue;
 
-    console.log("Checking:", id);
+    await markChecked(id);
 
     const result = await checkGame(id);
-
-    await markChecked(id);
 
     if (result) {
       await append(OUTPUT_FILE, `${result.title} | ${result.id}`);
     }
 
-    await sleep(500); // faster but still safe
+    // small random delay prevents bans
+    await sleep(150 + Math.random() * 300);
   }
-
-  await browser.close();
 }
 
-run();
+// -------------------- RUN --------------------
+for (let i = 0; i < CONCURRENCY; i++) {
+  worker();
+}
