@@ -28,7 +28,7 @@ const RANGES = [
 const BATCH_IDS = 50;        // Roblox multiget endpoints accept batches (keep conservative)
 const BATCHES_PER_RUN = 60;  // ~3000 IDs checked per workflow run
 const REQUEST_DELAY_MS = 250;
-const COMMIT_EVERY_N_BATCHES = 5; // checkpoint commit so cancelled runs don't lose progress
+const COMMIT_EVERY_N_BATCHES = 1; // checkpoint commit so cancelled runs don't lose progress
 
 /* ============================================================
    STATE
@@ -59,12 +59,33 @@ function commitCheckpoint(label) {
   try {
     execSync(`git config user.name "github-actions"`, { stdio: "ignore" });
     execSync(`git config user.email "github-actions@github.com"`, { stdio: "ignore" });
-    execSync(`git add ${OUTPUT_FILE} ${STATE_FILE}`, { stdio: "ignore" });
-    execSync(`git commit -m "checkpoint: ${label}" || echo "no changes"`, { stdio: "inherit" });
+
+    // Stage everything that may have changed
+    execSync(`git add .`, { stdio: "ignore" });
+
+    // Commit if needed
+    try {
+      execSync(`git commit -m "checkpoint: ${label}"`, {
+        stdio: "ignore"
+      });
+    } catch {
+      console.log("📁 No new changes to commit.");
+      return;
+    }
+
+    // Pull remote changes first in case another commit happened
+    try {
+      execSync(`git pull --rebase`, { stdio: "inherit" });
+    } catch {
+      console.log("⚠️ Could not rebase, continuing...");
+    }
+
+    // Push
     execSync(`git push`, { stdio: "inherit" });
-    console.log(`💾 Checkpoint committed (${label})`);
+
+    console.log(`💾 Saved progress (${label})`);
   } catch (e) {
-    console.log("⚠️ Checkpoint commit failed (continuing anyway):", e.message);
+    console.log("⚠️ Save failed:", e.message);
   }
 }
 
