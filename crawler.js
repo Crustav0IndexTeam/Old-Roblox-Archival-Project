@@ -7,7 +7,8 @@ import { execSync } from "child_process";
    CONFIG
    ============================================================ */
 
-const OUTPUT_FILE = "games.txt";
+const OUTPUT_FILE = "games.txt";     // only VALID/interesting results (or all — see WRITE_ALL_TO_GAMES below)
+const CHECKED_FILE = "checked.txt";  // every single ID that was checked, regardless of status
 const STATE_FILE = "scan_state.json"; // tracks resume position per range
 
 const MIN_YEAR = 2007;
@@ -29,6 +30,13 @@ const BATCH_IDS = 50;        // Roblox multiget endpoints accept batches (keep c
 const BATCHES_PER_RUN = 60;  // ~3000 IDs checked per workflow run
 const REQUEST_DELAY_MS = 250;
 const COMMIT_EVERY_N_BATCHES = 1; // checkpoint commit so cancelled runs don't lose progress
+const FLUSH_EVERY_N_ITEMS = 100;  // write buffered lines to disk every N processed IDs
+
+// If true, every checked ID's line goes into games.txt too (not just checked.txt).
+// If false, games.txt only gets lines worth keeping (VALID/UNRATED/etc — you decide below).
+const WRITE_ALL_TO_GAMES = true;
+
+console.log(`Scanning ${BATCHES_PER_RUN * BATCH_IDS} IDs this run.`);
 
 /* ============================================================
    STATE
@@ -45,10 +53,6 @@ if (await fs.pathExists(STATE_FILE)) {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
-}
-
-async function append(file, text) {
-  await fs.appendFile(file, text + "\n");
 }
 
 async function saveState() {
@@ -83,7 +87,7 @@ function commitCheckpoint(label) {
     // Push
     execSync(`git push`, { stdio: "inherit" });
 
-    console.log(`💾 Saved progress (${label})`);
+    console.log(`💾 Git checkpoint pushed (${label})`);
   } catch (e) {
     console.log("⚠️ Save failed:", e.message);
   }
@@ -176,6 +180,32 @@ function classify(place, gameInfo) {
 }
 
 /* ============================================================
+   BUFFERED WRITER
+   ============================================================ */
+
+// Every checked line always goes in checkedBuffer -> checked.txt.
+// gamesBuffer only gets a line if WRITE_ALL_TO_GAMES is true, or you
+// can tighten this to e.g. status !== "DELETED" to keep games.txt leaner.
+let checkedBuffer = [];
+let gamesBuffer = [];
+let itemsSinceFlush = 0;
+
+async function flushBuffers(force = false) {
+  if (!force && itemsSinceFlush < FLUSH_EVERY_N_ITEMS) return;
+  if (checkedBuffer.length === 0 && gamesBuffer.length === 0) return;
+
+  if (checkedBuffer.length) {
+    await fs.appendFile(CHECKED_FILE, checkedBuffer.join("\n") + "\n");
+    checkedBuffer = [];
+  }
+  if (gamesBuffer.length) {
+    await fs.appendFile(OUTPUT_FILE, gamesBuffer.join("\n") + "\n");
+    gamesBuffer = [];
+  }
+  itemsSinceFlush = 0;
+}
+
+/* ============================================================
    MAIN LOOP
    ============================================================ */
 
@@ -222,26 +252,34 @@ async function run() {
       const year = result.year || "?";
       const line = `${result.status} | ${id} | ${title || "(untitled)"} | YEAR:${year} | REASON:${result.reason}`;
 
-      console.log(`  ${id}: ${result.status}${result.year ? " (" + result.year + ")" : ""}`);
-      await append(OUTPUT_FILE, line);
+      console.log(`💾 Saved: ${line}`);
+
+      checkedBuffer.push(line);
+      if (WRITE_ALL_TO_GAMES) gamesBuffer.push(line);
+
+      itemsSinceFlush++;
+      await flushBuffers(); // no-op unless itemsSinceFlush hit FLUSH_EVERY_N_ITEMS
     }
 
     await saveState();
     batchesDone++;
 
     if (batchesDone % COMMIT_EVERY_N_BATCHES === 0) {
+      await flushBuffers(true); // make sure disk is up to date before committing
       commitCheckpoint(`batch ${b + 1}, cursor ${state.cursor}`);
     }
 
     await sleep(REQUEST_DELAY_MS);
   }
 
+  await flushBuffers(true); // final flush so nothing buffered gets lost
   await saveState();
   commitCheckpoint("end of run");
   console.log("\n🏁 Run complete.");
 }
 
-run().catch(e => {
+run().catch(async e => {
   console.error("Fatal error:", e);
+  await flushBuffers(true); // don't lose buffered progress on crash
   process.exit(1);
 });
