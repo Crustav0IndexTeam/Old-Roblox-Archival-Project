@@ -2,15 +2,20 @@ name: Roblox Crawler
 
 on:
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "0 * * * *"   # hourly instead of every 2h - each run is now much faster (API-based, no browser)
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: roblox-crawler
+  cancel-in-progress: false
+
 jobs:
   crawl:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repo
@@ -24,16 +29,16 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Playwright Chromium
-        run: node node_modules/playwright/cli.js install chromium
-
       - name: Run crawler
         run: node crawler.js
+        # crawler.js commits its own checkpoints periodically as it runs,
+        # so a cancelled/timed-out job still keeps whatever progress it made.
 
-      - name: Commit results
+      - name: Final commit (safety net)
+        if: always()
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add .
           git commit -m "auto update" || echo "no changes"
-          git push
+          git push || echo "nothing to push"
