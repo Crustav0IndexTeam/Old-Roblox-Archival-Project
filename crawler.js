@@ -6,93 +6,124 @@ import fs from "fs-extra";
 const OUTPUT_FILE = "games.txt";
 const CHECKED_FILE = "checked.txt";
 
-// Load already checked IDs
+// -------------------- LOAD CHECKED IDS --------------------
 let checked = new Set();
 
 if (await fs.pathExists(CHECKED_FILE)) {
   const data = await fs.readFile(CHECKED_FILE, "utf-8");
   data.split("\n").forEach((id) => {
-    if (id.trim()) checked.add(id.trim());
+    const clean = id.trim();
+    if (clean) checked.add(clean);
   });
 }
 
-// Append helper
-async function append(file, text) {
-  await fs.appendFile(file, text + "\n");
-}
+// -------------------- HELPERS --------------------
+const append = (file, text) =>
+  fs.appendFile(file, text + "\n");
 
-// Save checked ID helper
-async function markChecked(id) {
-  checked.add(String(id));
-  await append(CHECKED_FILE, String(id));
-}
+const markChecked = async (id) => {
+  const str = String(id);
+  checked.add(str);
+  await append(CHECKED_FILE, str);
+};
 
-// Random Roblox-like ID generator
 function randomId() {
   return Math.floor(Math.random() * (25000000 - 100000 + 1)) + 100000;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const browser = await chromium.launch({ headless: true });
+// -------------------- BROWSER --------------------
+const browser = await chromium.launch({
+  headless: true,
+});
+
 const page = await browser.newPage();
 
+// Block images/fonts for speed
+await page.route("**/*", (route) => {
+  const type = route.request().resourceType();
+  if (type === "image" || type === "font") {
+    return route.abort();
+  }
+  route.continue();
+});
+
+// -------------------- GAME CHECK --------------------
 async function checkGame(id) {
   const url = `https://www.roblox.com/games/${id}`;
 
   try {
-    await page.goto(url, {
+    const response = await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: 20000,
     });
 
     const finalUrl = page.url();
-    const title = await page.title();
+    const status = response?.status?.() || 0;
+
+    // 🔴 404 detection (fastest check)
+    if (
+      status === 404 ||
+      finalUrl.includes("request-error?code=404")
+    ) {
+      console.log(`❌ Deleted: ${id}`);
+      return null;
+    }
+
+    const title = (await page.title())?.trim() || "";
+
+    // 🔴 empty / placeholder page
+    if (!title || title === "Roblox") {
+      console.log(`⚠️ Empty: ${id}`);
+      return null;
+    }
+
+    // Only get HTML if needed (performance boost)
     const content = await page.content();
 
-    // 404 redirect
-    if (finalUrl.includes("request-error?code=404")) return null;
-
-    // Missing pages
-    if (
-      content.includes("Page not found") ||
-      content.includes("does not exist") ||
-      content.includes("Error 404")
-    ) {
+    // 🔞 Unrated / age blocked
+    if (content.includes("not accessible because it is unrated")) {
+      console.log(`🔞 Unrated: ${id}`);
       return null;
     }
 
-    // Unavailable experiences
+    // 🚫 unavailable / private / broken
     if (
-      content.includes("not accessible because it is unrated") ||
-      content.includes("experience cannot be visited")
+      content.includes("experience cannot be visited") ||
+      content.includes("unavailable") ||
+      content.includes("content is not available")
     ) {
+      console.log(`🚫 Unavailable: ${id}`);
       return null;
     }
 
-    // Invalid titles
-    if (!title || title === "Roblox") return null;
+    // ❌ fake titles
+    if (
+      title.toLowerCase().includes("play on roblox") ||
+      title.length < 3
+    ) {
+      console.log(`⚠️ Invalid: ${id}`);
+      return null;
+    }
 
-    if (title.toLowerCase().includes("play on roblox")) return null;
-
-    console.log(`FOUND: ${title} | ${id}`);
-
+    console.log(`✅ FOUND: ${title} | ${id}`);
     return { id, title };
-  } catch (e) {
+
+  } catch (err) {
+    console.log(`❌ Error: ${id}`);
     return null;
   }
 }
 
+// -------------------- MAIN LOOP --------------------
 async function run() {
   for (let i = 0; i < 200; i++) {
     const id = String(randomId());
 
-    console.log("Checking ID:", id);
-
-    // skip already checked IDs
     if (checked.has(id)) continue;
+
+    console.log("Checking:", id);
 
     const result = await checkGame(id);
 
@@ -102,7 +133,7 @@ async function run() {
       await append(OUTPUT_FILE, `${result.title} | ${result.id}`);
     }
 
-    await sleep(800);
+    await sleep(500); // faster but still safe
   }
 
   await browser.close();
