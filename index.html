@@ -2,140 +2,312 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Roblox Archive Index</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Old Roblox Archive</title>
 
 <style>
-body {
-  margin: 0;
-  font-family: Arial;
-  background: #0f0f0f;
-  color: white;
-}
+  :root {
+    --bg: #0d0d10;
+    --panel: #16161b;
+    --card: #1c1c22;
+    --border: #2a2a32;
+    --text: #eaeaea;
+    --muted: #9a9aa5;
+    --accent: #5ee6a8;
+    --valid: #2e9e5b;
+    --deleted: #c0392b;
+    --unrated: #d68910;
+    --unavailable: #7f5ad6;
+    --out_of_range: #4a4a55;
+    --empty: #555;
+  }
 
-header {
-  padding: 20px;
-}
+  * { box-sizing: border-box; }
 
-.controls {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
+  body {
+    margin: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
 
-input, select, button {
-  padding: 8px;
-  border-radius: 6px;
-  border: none;
-}
+  header {
+    padding: 20px 24px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
-  padding: 20px;
-}
+  h1 {
+    margin: 0 0 14px 0;
+    font-size: 22px;
+  }
 
-.card {
-  background: #1c1c1c;
-  padding: 10px;
-  border-radius: 10px;
-}
+  .stats {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+    font-size: 13px;
+    color: var(--muted);
+  }
 
-.badge {
-  font-size: 12px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  display: inline-block;
-}
+  .stats span b { color: var(--text); }
 
-.valid { background: green; }
-.deleted { background: red; }
-.unrated { background: orange; }
-.invalid { background: gray; }
+  .controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
 
-.play {
-  display: inline-block;
-  margin-top: 8px;
-}
+  input, select, button {
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #0f0f13;
+    color: var(--text);
+    font-size: 14px;
+  }
 
-.play img {
-  width: 120px;
-  height: auto;
-  display: block;
-}
+  input { flex: 1; min-width: 180px; }
+
+  button {
+    cursor: pointer;
+    background: #26262f;
+  }
+  button.active { background: var(--accent); color: #0d0d10; font-weight: bold; }
+
+  #list {
+    padding: 20px;
+  }
+
+  #list.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 14px;
+  }
+
+  #list.square {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
+  }
+
+  #list.list-view {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 12px;
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .list-view .card {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .title {
+    font-weight: bold;
+    font-size: 15px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .meta {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .reason {
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  .badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    display: inline-block;
+    text-transform: uppercase;
+    font-weight: bold;
+    color: white;
+    width: fit-content;
+  }
+
+  .VALID { background: var(--valid); }
+  .DELETED { background: var(--deleted); }
+  .UNRATED { background: var(--unrated); }
+  .UNAVAILABLE { background: var(--unavailable); }
+  .OUT_OF_RANGE { background: var(--out_of_range); }
+  .EMPTY { background: var(--empty); }
+
+  .play {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    text-decoration: none;
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: bold;
+  }
+
+  .play img {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+  }
+
+  .no-link {
+    color: var(--muted);
+    font-size: 12px;
+    font-style: italic;
+  }
+
+  .empty-state {
+    text-align: center;
+    color: var(--muted);
+    padding: 60px 20px;
+  }
 </style>
 </head>
 
 <body>
 
 <header>
-<h1>🕹 Roblox Archive</h1>
+  <h1>🕹 Old Roblox Archive <span style="color:var(--muted); font-weight:normal; font-size:14px;">(2007–2013)</span></h1>
 
-<div class="controls">
-<input id="search" placeholder="Search..." />
+  <div class="stats" id="stats"></div>
 
-<select id="filter">
-  <option value="all">All</option>
-  <option value="valid">Valid</option>
-  <option value="deleted">Deleted</option>
-  <option value="unrated">Unrated</option>
-  <option value="invalid">Invalid</option>
-</select>
+  <div class="controls">
+    <input id="search" placeholder="Search by title or ID..." />
 
-<select id="year">
-  <option value="all">All Years</option>
-  <option value="2013">2013</option>
-  <option value="2012">2012</option>
-  <option value="2011">2011</option>
-  <option value="2010">2010</option>
-  <option value="2009">2009</option>
-  <option value="2008">2008</option>
-  <option value="2007">2007</option>
-</select>
+    <select id="filter">
+      <option value="all">All statuses</option>
+      <option value="VALID">Valid</option>
+      <option value="DELETED">Deleted</option>
+      <option value="UNRATED">Unrated</option>
+      <option value="UNAVAILABLE">Unavailable</option>
+      <option value="OUT_OF_RANGE">Out of range</option>
+      <option value="EMPTY">Empty</option>
+    </select>
 
-</div>
+    <select id="year">
+      <option value="all">All years</option>
+      <option value="2013">2013</option>
+      <option value="2012">2012</option>
+      <option value="2011">2011</option>
+      <option value="2010">2010</option>
+      <option value="2009">2009</option>
+      <option value="2008">2008</option>
+      <option value="2007">2007</option>
+      <option value="unknown">Unknown</option>
+    </select>
+
+    <button data-layout="grid" class="layout-btn active">Grid</button>
+    <button data-layout="list-view" class="layout-btn">List</button>
+    <button data-layout="square" class="layout-btn">Square</button>
+  </div>
 </header>
 
 <div id="list" class="grid"></div>
 
 <script>
+const PLAY_ICON = "https://github.com/Crustav0IndexTeam/Old-Roblox-Archival-Project/blob/main/play%20button.png?raw=true";
+
 let games = [];
+let currentLayout = "grid";
+
+// Parses lines of the form:
+// STATUS | ID | Title | YEAR:2011 | REASON:some text
+function parseLine(line) {
+  const parts = line.split("|").map(p => p.trim());
+  const status = parts[0] || "UNKNOWN";
+  const id = parts[1] || "";
+  const title = parts[2] || "";
+  const yearField = (parts[3] || "").replace("YEAR:", "").trim();
+  const reasonField = (parts[4] || "").replace("REASON:", "").trim();
+
+  return {
+    status,
+    id,
+    title,
+    year: yearField || "unknown",
+    reason: reasonField || ""
+  };
+}
+
+function isValidRobloxId(id) {
+  return /^[0-9]+$/.test(id);
+}
 
 fetch("games.txt")
   .then(r => r.text())
   .then(text => {
-    games = text.split("\n").filter(Boolean).map(line => {
-      const parts = line.split("|");
-      return {
-        status: parts[0],
-        title: parts[1],
-        id: parts[2],
-        year: parts[3]?.replace("YEAR:", "")
-      };
-    });
+    games = text.split("\n").filter(Boolean).map(parseLine);
+    renderStats(games);
     render(games);
+  })
+  .catch(() => {
+    document.getElementById("list").innerHTML =
+      '<div class="empty-state">Could not load games.txt yet. The crawler may not have run.</div>';
   });
+
+function renderStats(data) {
+  const counts = {};
+  data.forEach(g => counts[g.status] = (counts[g.status] || 0) + 1);
+  const el = document.getElementById("stats");
+  el.innerHTML = `
+    <span>Total: <b>${data.length}</b></span>
+    ${Object.entries(counts).map(([k, v]) => `<span>${k}: <b>${v}</b></span>`).join("")}
+  `;
+}
 
 function render(data) {
   const list = document.getElementById("list");
-  list.innerHTML = "";
+  list.className = currentLayout;
 
-  data.forEach(g => {
-    const div = document.createElement("div");
-    div.className = "card";
+  if (data.length === 0) {
+    list.innerHTML = '<div class="empty-state">No games match these filters.</div>';
+    return;
+  }
 
-    div.innerHTML = `
-      <div><b>${g.title || "Unknown"}</b></div>
-      <div class="badge ${g.status}">${g.status}</div>
-      <div>Year: ${g.year || "?"}</div>
+  list.innerHTML = data.map(g => {
+    const safeTitle = (g.title || "Unknown").replace(/</g, "&lt;");
+    const safeReason = (g.reason || "").replace(/</g, "&lt;");
 
-      <a class="play" href="https://www.roblox.com/games/${g.id}" target="_blank">
-        <img src="https://github.com/Crustav0IndexTeam/Old-Roblox-Archival-Project/blob/main/play%20button.png?raw=true">
-      </a>
+    // Never build a link unless the ID is purely numeric -> avoids
+    // broken /games/Play%20on%20Roblox style URLs.
+    const linkHtml = isValidRobloxId(g.id)
+      ? `<a class="play" href="https://www.roblox.com/games/${g.id}" target="_blank" rel="noopener">
+           <img src="${PLAY_ICON}" alt="">Play
+         </a>`
+      : `<span class="no-link">No valid link</span>`;
+
+    return `
+      <div class="card">
+        <div class="title" title="${safeTitle}">${safeTitle}</div>
+        <div class="badge ${g.status}">${g.status.replace(/_/g, " ")}</div>
+        <div class="meta">ID: ${g.id || "?"} &middot; Year: ${g.year}</div>
+        ${safeReason ? `<div class="reason">${safeReason}</div>` : ""}
+        ${linkHtml}
+      </div>
     `;
-
-    list.appendChild(div);
-  });
+  }).join("");
 }
 
 function applyFilters() {
@@ -147,15 +319,24 @@ function applyFilters() {
     return (
       (f === "all" || g.status === f) &&
       (y === "all" || g.year === y) &&
-      (!q || g.title?.toLowerCase().includes(q))
+      (!q || g.title.toLowerCase().includes(q) || g.id.includes(q))
     );
   });
 
   render(filtered);
 }
 
-document.querySelectorAll("input, select").forEach(el => {
+document.querySelectorAll("#search, #filter, #year").forEach(el => {
   el.addEventListener("input", applyFilters);
+});
+
+document.querySelectorAll(".layout-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".layout-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentLayout = btn.dataset.layout;
+    applyFilters();
+  });
 });
 </script>
 
