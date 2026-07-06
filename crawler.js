@@ -1,226 +1,430 @@
-console.log("🚀 Roblox Archive Scanner (API mode) started");
+/**
+ * 🚀 Old Roblox Archival Project - Crawler v2
+ * * Architecture: Headless Chromium (Playwright) Worker Pool
+ * Focus: Reliability, Speed, Historical Preservation (2007-2013)
+ */
 
-import fs from "fs-extra";
-import { execSync } from "child_process";
+import { chromium } from 'playwright';
+import fs from 'fs-extra';
+import { execSync } from 'child_process';
 
 /* ============================================================
-   CONFIG
+   CONFIGURATION & TUNING
    ============================================================ */
 
-const OUTPUT_FILE = "games.txt";
-const STATE_FILE = "scan_state.json"; // tracks resume position per range
+const CONFIG = {
+    // Worker and Performance Settings
+    WORKER_COUNT: 4,                  // Number of concurrent Chromium tabs
+    PAGE_TIMEOUT: 15000,              // 15 seconds max per page navigation
+    MAX_RETRIES: 2,                   // How many times to retry a failed page load
+    
+    // Archival Target Years
+    MIN_YEAR: 2007,
+    MAX_YEAR: 2013,
 
-const MIN_YEAR = 2007;
-const MAX_YEAR = 2013;
+    // File Paths
+    FILES: {
+        GAMES: 'games.txt',
+        DELETED: 'deleted.txt',
+        PRIVATE: 'private.txt',
+        UNRATED: 'unrated.txt',
+        ERRORS: 'errors.txt',
+        OUT_OF_RANGE: 'out_of_range.txt',
+        STATE: 'scan_state.json',
+        STATS: 'stats.json'
+    },
 
-// Sequential ID ranges to scan. Old-Roblox IDs are broadly chronological,
-// so scanning sequential windows finds far more 2007-2013 games than
-// random sampling across the entire (mostly modern) ID space.
-// Adjust/extend these as you discover better boundaries (e.g. from
-// known IDs like Robloxity=12468179, Darkness I=131403963).
+    // Checkpointing
+    CHECKPOINT_INTERVAL: 500,         // Commit and push every N IDs processed
+};
+
+// Sequential ID ranges to scan
 const RANGES = [
-  { start: 1000, end: 2_000_000 },        // 2007-ish territory
-  { start: 2_000_000, end: 15_000_000 },  // 2008-2010ish
-  { start: 15_000_000, end: 40_000_000 }, // 2010-2011ish
-  { start: 40_000_000, end: 135_000_000 } // 2012-2013ish
+    { start: 1000, end: 2_000_000 },
+    { start: 2_000_000, end: 15_000_000 },
+    { start: 15_000_000, end: 40_000_000 },
+    { start: 40_000_000, end: 135_000_000 }
 ];
 
-const BATCH_IDS = 50;        // Roblox multiget endpoints accept batches (keep conservative)
-const BATCHES_PER_RUN = 60;  // ~3000 IDs checked per workflow run
-const REQUEST_DELAY_MS = 250;
-const COMMIT_EVERY_N_BATCHES = 5; // checkpoint commit so cancelled runs don't lose progress
+// Adaptive step sizes based on consecutive deletions
+const ADAPTIVE_STEPS = [1, 2, 5, 10, 25, 50, 100];
 
 /* ============================================================
-   STATE
+   GLOBAL STATE MANAGEMENT
    ============================================================ */
 
-let state = { rangeIndex: 0, cursor: RANGES[0].start };
-if (await fs.pathExists(STATE_FILE)) {
-  try {
-    state = JSON.parse(await fs.readFile(STATE_FILE, "utf-8"));
-  } catch {
-    console.log("⚠️ Could not parse state file, starting fresh");
-  }
-}
+let state = {
+    rangeIndex: 0,
+    currentId: RANGES[0].start,
+    consecutiveDeleted: 0,
+    idsProcessedSinceCommit: 0
+};
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+let stats = {
+    checked: 0,
+    valid: 0,
+    deleted: 0,
+    private: 0,
+    unrated: 0,
+    errors: 0,
+    outOfRange: 0,
+    startTime: Date.now()
+};
 
-async function append(file, text) {
-  await fs.appendFile(file, text + "\n");
-}
+// Thread-safe(ish) ID generator for the worker pool
+function getNextId() {
+    if (state.rangeIndex >= RANGES.length) return null;
 
-async function saveState() {
-  await fs.writeFile(STATE_FILE, JSON.stringify(state));
-}
+    const idToReturn = state.currentId;
+    
+    // Determine current step based on how many consecutive deletes we've seen
+    let stepIndex = Math.floor(state.consecutiveDeleted / 50); // Increase step every 50 deletes
+    if (stepIndex >= ADAPTIVE_STEPS.length) stepIndex = ADAPTIVE_STEPS.length - 1;
+    const currentStep = ADAPTIVE_STEPS[stepIndex];
 
-function commitCheckpoint(label) {
-  try {
-    execSync(`git config user.name "github-actions"`, { stdio: "ignore" });
-    execSync(`git config user.email "github-actions@github.com"`, { stdio: "ignore" });
-    execSync(`git add ${OUTPUT_FILE} ${STATE_FILE}`, { stdio: "ignore" });
-    execSync(`git commit -m "checkpoint: ${label}" || echo "no changes"`, { stdio: "inherit" });
-    execSync(`git push`, { stdio: "inherit" });
-    console.log(`💾 Checkpoint committed (${label})`);
-  } catch (e) {
-    console.log("⚠️ Checkpoint commit failed (continuing anyway):", e.message);
-  }
-}
+    state.currentId += currentStep;
 
-function nextIdBatch() {
-  const ids = [];
-  while (ids.length < BATCH_IDS) {
-    if (state.rangeIndex >= RANGES.length) return ids; // all ranges exhausted
-    const range = RANGES[state.rangeIndex];
-    if (state.cursor > range.end) {
-      state.rangeIndex++;
-      if (state.rangeIndex < RANGES.length) state.cursor = RANGES[state.rangeIndex].start;
-      continue;
-    }
-    ids.push(state.cursor);
-    state.cursor++;
-  }
-  return ids;
-}
-
-/* ============================================================
-   ROBLOX API HELPERS
-   ============================================================ */
-
-async function fetchJson(url) {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0 (RobloxArchiveProject/1.0)" }
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} for ${url}`);
-  }
-  return res.json();
-}
-
-// Batch place details: name, universeId, isPlayable, reasonProhibited
-async function getPlaceDetails(ids) {
-  const url = `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${ids.join(",")}`;
-  return fetchJson(url);
-}
-
-// Batch universe/game details: created date, visits, etc.
-async function getGameDetails(universeIds) {
-  if (universeIds.length === 0) return [];
-  const url = `https://games.roblox.com/v1/games?universeIds=${universeIds.join(",")}`;
-  const data = await fetchJson(url);
-  return data.data || [];
-}
-
-function classify(place, gameInfo) {
-  // place: entry from multiget-place-details (may be undefined -> id doesn't exist at all)
-  // gameInfo: matching entry from /v1/games (may be undefined -> universe data unavailable)
-
-  if (!place) {
-    return { status: "DELETED", reason: "No place data returned by Roblox (place does not exist or was deleted)" };
-  }
-
-  const reasonProhibited = place.reasonProhibited || "None";
-
-  if (reasonProhibited === "Unrated") {
-    return { status: "UNRATED", reason: "Roblox reports this experience as unrated (reasonProhibited=Unrated)" };
-  }
-  if (reasonProhibited !== "None") {
-    return { status: "UNAVAILABLE", reason: `Roblox reports reasonProhibited=${reasonProhibited}` };
-  }
-  if (place.isPlayable === false) {
-    return { status: "UNAVAILABLE", reason: "isPlayable=false returned by Roblox API" };
-  }
-  if (!place.name || place.name.trim() === "") {
-    return { status: "EMPTY", reason: "Place exists but has no name/title data" };
-  }
-
-  if (!gameInfo) {
-    return { status: "UNAVAILABLE", reason: "Place exists but universe/game data could not be retrieved (likely private or restricted)" };
-  }
-
-  const created = gameInfo.created ? new Date(gameInfo.created) : null;
-  const year = created ? created.getFullYear() : null;
-
-  if (year && (year < MIN_YEAR || year > MAX_YEAR)) {
-    return { status: "OUT_OF_RANGE", reason: `Created ${created.toISOString().slice(0, 10)}, outside target range`, year };
-  }
-
-  return {
-    status: "VALID",
-    reason: "Confirmed playable via Roblox Games API with creation date in target range",
-    title: gameInfo.name || place.name,
-    year: year || "unknown"
-  };
-}
-
-/* ============================================================
-   MAIN LOOP
-   ============================================================ */
-
-async function run() {
-  let batchesDone = 0;
-
-  for (let b = 0; b < BATCHES_PER_RUN; b++) {
-    const ids = nextIdBatch();
-    if (ids.length === 0) {
-      console.log("✅ All configured ID ranges have been fully scanned.");
-      break;
+    // Move to next range if we exceed the current one
+    if (state.currentId > RANGES[state.rangeIndex].end) {
+        state.rangeIndex++;
+        if (state.rangeIndex < RANGES.length) {
+            state.currentId = RANGES[state.rangeIndex].start;
+        }
     }
 
-    console.log(`\n🔍 Batch ${b + 1}/${BATCHES_PER_RUN}: IDs ${ids[0]}–${ids[ids.length - 1]}`);
+    return idToReturn;
+}
 
-    let places = [];
+/* ============================================================
+   INITIALIZATION & FILE I/O
+   ============================================================ */
+
+async function initializeFiles() {
+    // Load existing state if resuming from a previous GH Action run
+    if (await fs.pathExists(CONFIG.FILES.STATE)) {
+        try {
+            const savedState = await fs.readJSON(CONFIG.FILES.STATE);
+            state = { ...state, ...savedState };
+            console.log(`[STATE] Resuming from Range ${state.rangeIndex}, ID: ${state.currentId}`);
+        } catch (e) {
+            console.warn("⚠️ Failed to parse scan_state.json, starting fresh.");
+        }
+    }
+
+    if (await fs.pathExists(CONFIG.FILES.STATS)) {
+        try {
+            const savedStats = await fs.readJSON(CONFIG.FILES.STATS);
+            stats = { ...stats, ...savedStats };
+            stats.startTime = Date.now(); // Reset start time for current session ETA calculation
+        } catch (e) {
+            // Ignore stats parse error
+        }
+    }
+}
+
+async function writeResult(file, id, status, reason, metadata = {}) {
+    const timestamp = new Date().toISOString();
+    const metaStr = Object.keys(metadata).length ? JSON.stringify(metadata) : '';
+    const line = `[${timestamp}] ${status} | ID: ${id} | REASON: ${reason} | META: ${metaStr}\n`;
+    
+    await fs.appendFile(file, line);
+    
+    // Save immediate state to prevent data loss on sudden crash
+    await fs.writeJSON(CONFIG.FILES.STATE, state, { spaces: 2 });
+    await fs.writeJSON(CONFIG.FILES.STATS, stats, { spaces: 2 });
+}
+
+/* ============================================================
+   GITHUB ACTIONS CHECKPOINTING
+   ============================================================ */
+
+function commitCheckpoint() {
     try {
-      const details = await getPlaceDetails(ids);
-      places = details.length ? details : (details.PlaceDetails || details.placeDetails || []);
-      if (!Array.isArray(places)) places = [];
+        console.log("\n💾 Saving Checkpoint to GitHub...");
+        execSync(`git config user.name "github-actions[bot]"`, { stdio: "ignore" });
+        execSync(`git config user.email "github-actions[bot]@users.noreply.github.com"`, { stdio: "ignore" });
+        
+        execSync(`git add *.txt *.json`, { stdio: "ignore" });
+        execSync(`git commit -m "chore: Crawler checkpoint ID ${state.currentId}" || echo "No changes to commit"`, { stdio: "ignore" });
+        execSync(`git push`, { stdio: "ignore" });
+        
+        console.log("✅ Checkpoint successfully pushed.");
+        state.idsProcessedSinceCommit = 0;
     } catch (e) {
-      console.log("❌ multiget-place-details failed:", e.message);
-      await sleep(REQUEST_DELAY_MS * 4);
-      continue;
+        console.log("⚠️ Checkpoint push failed (Network issue or permissions). Crawler will continue.", e.message);
     }
-
-    const placeById = new Map(places.map(p => [p.placeId, p]));
-    const universeIds = [...new Set(places.map(p => p.universeId).filter(Boolean))];
-
-    let gamesByUniverse = new Map();
-    try {
-      const games = await getGameDetails(universeIds);
-      gamesByUniverse = new Map(games.map(g => [g.id, g]));
-    } catch (e) {
-      console.log("⚠️ /v1/games batch failed (will mark those as unavailable):", e.message);
-    }
-
-    for (const id of ids) {
-      const place = placeById.get(id);
-      const gameInfo = place ? gamesByUniverse.get(place.universeId) : undefined;
-      const result = classify(place, gameInfo);
-
-      const title = (result.title || place?.name || "").replace(/\|/g, "/").trim();
-      const year = result.year || "?";
-      const line = `${result.status} | ${id} | ${title || "(untitled)"} | YEAR:${year} | REASON:${result.reason}`;
-
-      console.log(`  ${id}: ${result.status}${result.year ? " (" + result.year + ")" : ""}`);
-      await append(OUTPUT_FILE, line);
-    }
-
-    await saveState();
-    batchesDone++;
-
-    if (batchesDone % COMMIT_EVERY_N_BATCHES === 0) {
-      commitCheckpoint(`batch ${b + 1}, cursor ${state.cursor}`);
-    }
-
-    await sleep(REQUEST_DELAY_MS);
-  }
-
-  await saveState();
-  commitCheckpoint("end of run");
-  console.log("\n🏁 Run complete.");
 }
 
-run().catch(e => {
-  console.error("Fatal error:", e);
-  process.exit(1);
-});
+/* ============================================================
+   PLAYWRIGHT LOGIC & DOM ANALYSIS
+   ============================================================ */
+
+async function setupBrowser() {
+    const browser = await chromium.launch({
+        headless: true,
+        args: [
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu'
+        ]
+    });
+    return browser;
+}
+
+// Blocks heavy resources to ensure Playwright flies through pages at maximum speed
+async function optimizePage(page) {
+    await page.route('**/*', (route) => {
+        const type = route.request().resourceType();
+        const blockedTypes = ['image', 'stylesheet', 'font', 'media', 'other'];
+        const url = route.request().url();
+
+        if (blockedTypes.includes(type) || url.includes('google-analytics') || url.includes('tracker')) {
+            route.abort();
+        } else {
+            route.continue();
+        }
+    });
+}
+
+// Analyzes the loaded DOM to classify the experience and extract metadata
+async function analyzePage(page, id) {
+    // 1. Check for immediate redirects to /games (Standard Roblox behavior for deleted/invalid games)
+    if (page.url().endsWith('/games') || page.url().endsWith('/discover')) {
+        return { status: 'DELETED', reason: 'Redirected to games/discover page' };
+    }
+
+    // 2. Extract DOM data. We execute this block inside the browser context.
+    const data = await page.evaluate(() => {
+        const titleEl = document.querySelector('.game-name, h1');
+        const creatorEl = document.querySelector('.game-creator a');
+        const errorEl = document.querySelector('.error-message');
+        const privateBadge = document.querySelector('.icon-private, [text*="unavailable"]');
+        const unratedBadge = document.querySelector('.age-rating-unrated');
+        
+        // Scraping stats from the game-stat-container
+        const statsNodes = document.querySelectorAll('.game-stat');
+        let createdYear = null;
+        let visits = null;
+        let maxPlayers = null;
+
+        statsNodes.forEach(node => {
+            const text = node.innerText.toLowerCase();
+            if (text.includes('created')) {
+                const dateMatch = text.match(/\d{4}/);
+                if (dateMatch) createdYear = parseInt(dateMatch[0], 10);
+            }
+            if (text.includes('visits')) {
+                visits = node.innerText.replace(/\D/g, '');
+            }
+            if (text.includes('max players')) {
+                maxPlayers = node.innerText.replace(/\D/g, '');
+            }
+        });
+
+        return {
+            title: titleEl ? titleEl.innerText.trim() : null,
+            creator: creatorEl ? creatorEl.innerText.trim() : null,
+            errorText: errorEl ? errorEl.innerText.trim() : null,
+            isPrivate: !!privateBadge,
+            isUnrated: !!unratedBadge,
+            createdYear,
+            visits,
+            maxPlayers,
+            bodyText: document.body.innerText.substring(0, 500) // snippet for fallback analysis
+        };
+    });
+
+    // 3. Classification Logic based on extracted DOM data
+    if (data.errorText || data.bodyText.includes('Page cannot be found')) {
+        return { status: 'DELETED', reason: data.errorText || 'Page not found text detected' };
+    }
+    
+    if (data.bodyText.includes('Content Deleted') || data.title === '[ Content Deleted ]') {
+        return { status: 'CONTENT_DELETED', reason: 'Content deleted placeholder found' };
+    }
+
+    if (data.bodyText.includes('under review')) {
+        return { status: 'UNDER_REVIEW', reason: 'Moderation review text found' };
+    }
+
+    if (data.isUnrated || data.bodyText.includes('unrated')) {
+        return { status: 'UNRATED', reason: 'Unrated UI badge or text detected' };
+    }
+
+    if (data.isPrivate || data.bodyText.includes('experience is unavailable')) {
+        return { status: 'PRIVATE', reason: 'Private icon or unavailable text detected' };
+    }
+
+    if (!data.title) {
+        return { status: 'EMPTY', reason: 'No title or discernible game data loaded' };
+    }
+
+    // 4. Historical Range Verification
+    if (data.createdYear) {
+        if (data.createdYear < CONFIG.MIN_YEAR || data.createdYear > CONFIG.MAX_YEAR) {
+            return { 
+                status: 'OUT_OF_RANGE', 
+                reason: `Created in ${data.createdYear}, outside target ${CONFIG.MIN_YEAR}-${CONFIG.MAX_YEAR}`,
+                metadata: data
+            };
+        }
+    } else {
+        // If we can't find a year but it has a title, we log it as UNKNOWN year to be safe, but treat as VALID.
+        data.createdYear = 'UNKNOWN';
+    }
+
+    // 5. Valid Game Passed all checks
+    return { 
+        status: 'VALID', 
+        reason: 'Successfully scraped metadata and verified year',
+        metadata: {
+            title: data.title,
+            creator: data.creator,
+            year: data.createdYear,
+            visits: data.visits,
+            maxPlayers: data.maxPlayers
+        }
+    };
+}
+
+/* ============================================================
+   WORKER LOOP & EXECUTION
+   ============================================================ */
+
+async function runWorker(browser, workerId) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await optimizePage(page);
+
+    while (true) {
+        const id = getNextId();
+        if (id === null) break; // All ranges exhausted
+
+        let attempt = 0;
+        let success = false;
+        let result = null;
+
+        while (attempt < CONFIG.MAX_RETRIES && !success) {
+            attempt++;
+            try {
+                const targetUrl = `https://www.roblox.com/games/${id}/-`;
+                
+                // domcontentloaded is faster than networkidle. We don't need heavy assets.
+                await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.PAGE_TIMEOUT });
+                
+                result = await analyzePage(page, id);
+                success = true;
+
+            } catch (error) {
+                if (attempt === CONFIG.MAX_RETRIES) {
+                    result = { status: 'ERROR', reason: `Navigation failed after ${CONFIG.MAX_RETRIES} attempts: ${error.message}` };
+                }
+            }
+        }
+
+        // Process Result & Update Counters
+        stats.checked++;
+        state.idsProcessedSinceCommit++;
+
+        const fileMap = {
+            'VALID': CONFIG.FILES.GAMES,
+            'DELETED': CONFIG.FILES.DELETED,
+            'CONTENT_DELETED': CONFIG.FILES.DELETED,
+            'PRIVATE': CONFIG.FILES.PRIVATE,
+            'UNAVAILABLE': CONFIG.FILES.PRIVATE,
+            'UNRATED': CONFIG.FILES.UNRATED,
+            'OUT_OF_RANGE': CONFIG.FILES.OUT_OF_RANGE,
+            'ERROR': CONFIG.FILES.ERRORS,
+            'EMPTY': CONFIG.FILES.ERRORS,
+            'UNDER_REVIEW': CONFIG.FILES.PRIVATE
+        };
+
+        const targetFile = fileMap[result.status] || CONFIG.FILES.ERRORS;
+        await writeResult(targetFile, id, result.status, result.reason, result.metadata);
+
+        // Adaptive Scanning Logic Adjustment
+        if (result.status === 'DELETED' || result.status === 'ERROR' || result.status === 'EMPTY') {
+            state.consecutiveDeleted++;
+        } else {
+            state.consecutiveDeleted = 0; // Reset step size when we hit something tangible
+        }
+
+        // Update Stats for Logging
+        if (result.status === 'VALID') stats.valid++;
+        else if (result.status === 'DELETED') stats.deleted++;
+        else if (result.status === 'PRIVATE' || result.status === 'UNAVAILABLE') stats.private++;
+        else if (result.status === 'UNRATED') stats.unrated++;
+        else if (result.status === 'OUT_OF_RANGE') stats.outOfRange++;
+        else stats.errors++;
+
+        // Live Console Output
+        const icon = result.status === 'VALID' ? '✅' : 
+                     result.status === 'DELETED' ? '❌' : 
+                     result.status === 'OUT_OF_RANGE' ? '⏭️ ' :
+                     result.status === 'UNRATED' ? '🔞' :
+                     result.status === 'PRIVATE' ? '🚫' : '⚠️';
+        
+        const titleText = result.metadata?.title ? ` | ${result.metadata.title}` : '';
+        const yearText = result.metadata?.year ? ` | YEAR ${result.metadata.year}` : '';
+        
+        console.log(`${icon} ${result.status.padEnd(12)} | ID ${String(id).padEnd(9)}${titleText}${yearText} | ${result.reason}`);
+
+        // Checkpoint logic
+        if (state.idsProcessedSinceCommit >= CONFIG.CHECKPOINT_INTERVAL) {
+            commitCheckpoint();
+        }
+    }
+
+    await context.close();
+}
+
+/* ============================================================
+   MAIN ORCHESTRATOR
+   ============================================================ */
+
+async function main() {
+    console.log("🚀 Starting Old Roblox Archival Project Crawler (Playwright V2)");
+    
+    await initializeFiles();
+    
+    // Status logging interval
+    const logInterval = setInterval(() => {
+        const elapsedMinutes = (Date.now() - stats.startTime) / 60000;
+        const speed = (stats.checked / (elapsedMinutes * 60)).toFixed(2);
+        
+        console.log(`\n=========================================`);
+        console.log(`📊 LIVE STATS`);
+        console.log(`Workers: ${CONFIG.WORKER_COUNT} | Speed: ${speed} IDs/sec`);
+        console.log(`Checked: ${stats.checked} | Valid: ${stats.valid} | Deleted: ${stats.deleted}`);
+        console.log(`Private: ${stats.private} | Unrated: ${stats.unrated} | Errors: ${stats.errors}`);
+        console.log(`Current ID: ${state.currentId} | Step Size: ${ADAPTIVE_STEPS[Math.min(Math.floor(state.consecutiveDeleted / 50), ADAPTIVE_STEPS.length - 1)]}`);
+        console.log(`=========================================\n`);
+    }, 30000); // Print stats every 30 seconds
+
+    let browser;
+    try {
+        browser = await setupBrowser();
+        
+        // Spawn Workers
+        const workers = [];
+        for (let i = 0; i < CONFIG.WORKER_COUNT; i++) {
+            workers.push(runWorker(browser, i));
+        }
+
+        // Wait for all workers to complete (which theoretically takes months based on ranges)
+        await Promise.all(workers);
+
+    } catch (e) {
+        console.error("💥 Fatal Error in Main Thread:", e);
+    } finally {
+        if (browser) await browser.close();
+        clearInterval(logInterval);
+        commitCheckpoint();
+        console.log("🏁 Crawler Shutdown Complete.");
+    }
+}
+
+// Execute
+main();
