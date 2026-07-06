@@ -24,8 +24,8 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps
+      - name: Install Playwright Chromium
+        run: node node_modules/playwright/cli.js install chromium
 
       - name: Run crawler
         run: node crawler.js
