@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Roblox Archive Index</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f0f0f;
+      color: #eaeaea;
+      margin: 0;
+      padding: 20px;
+    }
+
+    h1 {
+      margin-bottom: 10px;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px;
+      font-size: 16px;
+      margin-bottom: 20px;
+      border: none;
+      border-radius: 5px;
+    }
+
+    .item {
+      background: #1c1c1c;
+      padding: 10px;
+      margin-bottom: 10px;
+      border-radius: 6px;
+    }
+
+    a {
+      color: #4ea1ff;
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .id {
+      font-size: 12px;
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+
+<h1>🕹 Roblox Archive Index</h1>
+
+<input type="text" id="search" placeholder="Search games..." />
+
+<div id="list"></div>
+
+<script>
+let games = [];
+
+// Load games.txt
+fetch("games.txt")
+  .then(res => res.text())
+  .then(text => {
+    games = text
+      .split("\n")
+      .filter(line => line.trim())
+      .map(line => {
+        const parts = line.split("|");
+        return {
+          title: parts[0]?.trim(),
+          id: parts[1]?.trim()
+        };
+      });
+
+    render(games);
+  });
+
+function render(data) {
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+
+  data.forEach(g => {
+    const div = document.createElement("div");
+    div.className = "item";
+
+    div.innerHTML = `
+      <div><strong>${g.title}</strong></div>
+      <div class="id">ID: ${g.id}</div>
+      <a href="https://www.roblox.com/games/${g.id}" target="_blank">
+        Open on Roblox
+      </a>
+    `;
+
+    list.appendChild(div);
+  });
+}
+
+document.getElementById("search").addEventListener("input", e => {
+  const q = e.target.value.toLowerCase();
+
+  const filtered = games.filter(g =>
+    g.title?.toLowerCase().includes(q) ||
+    g.id?.includes(q)
+  );
+
+  render(filtered);
+});
+</script>
+
+</body>
+</html>
