@@ -20,8 +20,12 @@ jobs:
           node-version: 20
 
       - run: npm install
-      - run: npx playwright install --with-deps
-      - run: node crawler.js
+
+- run: npx playwright install
+
+- run: npx playwright install-deps
+
+- run: node crawler.js
 
       - name: Commit results
         run: |
